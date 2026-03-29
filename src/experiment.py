@@ -2,6 +2,7 @@ import logging
 
 from copy import deepcopy
 import numpy as np
+import time
 
 from omegaconf import DictConfig
 from hydra.utils import instantiate
@@ -120,11 +121,23 @@ def experiment(config: DictConfig) -> None:
         log.info(f'Setting up task')
         method.setup_task(task_id)
 
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats(device=fabric.device)
+        
+        task_train_time = 0.0
+        
+        setup_start = time.time()
+        log.info(f'Setting up task')
+        method.setup_task(task_id)
+        task_train_time += (time.time() - setup_start)
+
         with fabric.init_tensor():
             for epoch in range(config.exp.epochs):
                 lastepoch = (epoch == config.exp.epochs-1)
                 log.info(f'Epoch {epoch + 1}/{config.exp.epochs}')
+                train_start = time.time()
                 train(method, train_task, task_id, log_per_batch)
+                task_train_time += (time.time() - train_start)
                 acc = test(method, test_task, task_id, gen_cm, log_per_batch)
                 if calc_fwt:
                     method_tmp = Composer(
@@ -150,6 +163,21 @@ def experiment(config: DictConfig) -> None:
                         if lastepoch:
                             R[task_id, j] = acc
         wandb.log({f'avg_acc': R[task_id, :task_id+1].mean()})
+
+        if torch.cuda.is_available():
+            peak_memory_mb = torch.cuda.max_memory_allocated(device=fabric.device) / (1024 ** 2)
+        else:
+            peak_memory_mb = 0.0
+
+        log.info(f"--- Efficiency Metrics for Task {task_id + 1} ---")
+        log.info(f"Total Training Time (Setup + Epochs): {task_train_time:.2f} seconds")
+        log.info(f"Peak GPU Memory Used: {peak_memory_mb:.2f} MB")
+        
+        wandb.log({
+            'efficiency/task_train_time_sec': task_train_time,
+            'efficiency/peak_gpu_memory_mb': peak_memory_mb,
+            'efficiency/task_id': task_id
+        })
 
         if stop_task is not None and task_id == stop_task:
             break
